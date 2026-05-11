@@ -1,0 +1,8 @@
+#!/bin/bash
+sleep 4
+# Запускаем DSI-панель только если оба дисплея есть
+if wlr-randr 2>/dev/null | grep -q "DSI-1" && wlr-randr 2>/dev/null | grep -q "HDMI-A-2"; then
+  if ! pgrep -f "wf-panel-pi.*wfpanel-dsi" > /dev/null 2>&1; then
+    /usr/bin/wf-panel-pi -c /home/pi/.config/wfpanel/wfpanel-dsi.ini &
+  fi
+fi
