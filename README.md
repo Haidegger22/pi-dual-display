@@ -58,39 +58,51 @@ height=36
 plugins=menu,spacer,network,bluetooth,volume,clock,powermenu
 ```
 
-### 3. Autostart labwc — системный
+### 3. panel-watchdog — управление панелями (hotplug-ready)
 
-Файл: `/etc/xdg/labwc/autostart` — **отредактирован** (убраны `lwrespawn`):
+**Проблема:** wf-panel-pi с жёстким `monitor=` не реагирует на горячее подключение HDMI. Если дисплей не был подключён на момент старта сессии — панель на нём не появляется.
+
+**Решение:** демон `panel-watchdog.sh`, который следит за подключением/отключением дисплеев и перезапускает панели на лету.
+
+Файл: `scripts/panel-watchdog.sh` (в этом репозитории). Путь назначения: `~/.local/bin/panel-watchdog.sh`
+
+```bash
+# Установка
+mkdir -p ~/.local/bin
+cp scripts/panel-watchdog.sh ~/.local/bin/
+chmod +x ~/.local/bin/panel-watchdog.sh
+```
+
+**Как работает:**
+- При старте запускает wf-panel-pi на **всех** подключённых дисплеях
+- Мониторит изменения через `inotifywait` на `/sys/class/drm/*/status`
+- Дублирует через `udevadm monitor` для надёжности
+- При любом изменении (hotplug HDMI) убивает старые панели и запускает новые
+- Для DSI-1 использует `wfpanel-dsi.ini`, для HDMI-дисплеев динамически создаёт конфиг
+
+> `lwrespawn` убран, т.к. его `pgrep` ищет по полному пути вместо имени процесса, что приводит к дублям панелей.
+
+### 4. Autostart labwc — системный
+
+Файл: `/etc/xdg/labwc/autostart` — **заменён** `wf-panel-pi` на `panel-watchdog.sh`:
 
 ```bash
 /usr/bin/pcmanfm-pi &
-/usr/bin/wf-panel-pi &
+/home/pi/.local/bin/panel-watchdog.sh &
 /usr/bin/kanshi &
 /usr/bin/lxsession-xdg-autostart
 ```
 
-> `lwrespawn` убран, т.к. его `pgrep` неверно проверяет запущенные процессы (ищет по полному пути вместо имени), что приводит к дублям панелей.
+### 5. Autostart labwc — пользовательский
 
-### 4. Autostart labwc — пользовательский (DSI)
-
-Файл: `~/.config/labwc/autostart`
+Файл: `~/.config/labwc/autostart` — очищен (всё управление панелями через watchdog):
 
 ```bash
 #!/bin/bash
-sleep 4
-# Запускаем DSI-панель только если оба дисплея подключены
-if wlr-randr 2>/dev/null | grep -q "DSI-1" && \
-   wlr-randr 2>/dev/null | grep -q "HDMI-A-2"; then
-  if ! pgrep -f "wf-panel-pi.*wfpanel-dsi" > /dev/null 2>&1; then
-    /usr/bin/wf-panel-pi \
-      -c /home/pi/.config/wfpanel/wfpanel-dsi.ini &
-  fi
-fi
+# user autostart — всё управление панелями через panel-watchdog.sh
 ```
 
-Защита от дублей: проверка, что DSI-панель ещё не запущена.
-
-### 5. Зеркалирование (опционально)
+### 6. Зеркалирование (опционально)
 
 Установка: `sudo apt install wl-mirror`
 
@@ -113,57 +125,44 @@ fi
 ## Установка (с нуля)
 
 ```bash
-# 1. Создать конфиг основной панели
+# 1. Создать конфиг панели для DSI
 mkdir -p ~/.config/wfpanel
-cat > ~/.config/wfpanel/wfpanel.ini << 'EOF'
-[panel]
-monitor=HDMI-A-2
-position=top
-height=36
-plugins=menu,spacer,network,bluetooth,volume,clock,powermenu
-EOF
-
-# 2. Исправить системный autostart (убрать lwrespawn)
-sudo sed -i 's|/usr/bin/lwrespawn /usr/bin/wf-panel-pi|/usr/bin/wf-panel-pi|' \
-  /etc/xdg/labwc/autostart
-sudo sed -i 's|/usr/bin/lwrespawn /usr/bin/pcmanfm-pi|/usr/bin/pcmanfm-pi|' \
-  /etc/xdg/labwc/autostart
-
-# 3. Создать пользовательский autostart для DSI
-mkdir -p ~/.config/labwc
-cat > ~/.config/labwc/autostart << 'EOF'
-#!/bin/bash
-sleep 4
-if wlr-randr 2>/dev/null | grep -q "DSI-1" && \
-   wlr-randr 2>/dev/null | grep -q "HDMI-A-2"; then
-  if ! pgrep -f "wf-panel-pi.*wfpanel-dsi" > /dev/null 2>&1; then
-    cat > /tmp/wfpanel-dsi.ini << 'INI'
+cat > ~/.config/wfpanel/wfpanel-dsi.ini << 'EOF'
 [panel]
 monitor=DSI-1
 position=top
 height=36
 plugins=menu,spacer,network,bluetooth,volume,clock,powermenu
-INI
-    /usr/bin/wf-panel-pi -c /tmp/wfpanel-dsi.ini &
-  fi
-fi
 EOF
+
+# 2. Установить panel-watchdog
+mkdir -p ~/.local/bin
+cp scripts/panel-watchdog.sh ~/.local/bin/
+chmod +x ~/.local/bin/panel-watchdog.sh
+
+# 3. Исправить системный autostart (заменить wf-panel-pi на watchdog)
+sudo sed -i 's|/usr/bin/wf-panel-pi|/home/pi/.local/bin/panel-watchdog.sh|' \
+  /etc/xdg/labwc/autostart
+
+# 4. Очистить пользовательский autostart (если был)
+mkdir -p ~/.config/labwc
+echo '#!/bin/bash' > ~/.config/labwc/autostart
 chmod +x ~/.config/labwc/autostart
 
-# 4. Установить wl-mirror (опционально)
+# 5. Установить wl-mirror (опционально)
 sudo apt install -y wl-mirror
 ```
 
+## Быстрый старт watchdog (без перезагрузки)
+
+```bash
+killall -q wf-panel-pi 2>/dev/null
+/home/pi/.local/bin/panel-watchdog.sh &
+```
+
+Лог: `cat /tmp/panel-watchdog.log`
+
 ## Известные проблемы
-
-### `lwrespawn` дублирует панели
-`lwrespawn` использует `pgrep /usr/bin/wf-panel-pi`, но `pgrep` ищет по имени процесса (первые 15 символов), а не по полному пути.
-Проверка не срабатывает → второй экземпляр.
-
-**Решение:** не использовать `lwrespawn`, вызывать `/usr/bin/wf-panel-pi` напрямую.
-
-### DSI определяется не сразу
-Панель на DSI стартует с задержкой 4 секунды, чтобы дисплей успел инициализироваться.
 
 ### Разные разрешения
 DSI (800×480) и HDMI (1360×768) — зеркалирование возможно только в режиме 800×480 (HDMI переключается принудительно через `cvt` + `xrandr`, или в Wayland через `wl-mirror`).
