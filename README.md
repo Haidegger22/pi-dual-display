@@ -11,9 +11,9 @@ Wayland (labwc), расширенный рабочий стол с отдель�
 | Компонент | Детали |
 |-----------|--------|
 | **Pi** | Raspberry Pi 4 (8GB), Debian 13 (trixie) |
-| **Дисплей DSI** | 4.3", 800×480, реплика Waveshare DSI |
-| **Дисплей HDMI** | LG TV, 1360×768 (через HDMI-A-2) |
-| **Композитор** | labwc (Wayland) |
+| **Дисплей DSI** | 4.3", 800x480, реплика Waveshare DSI |
+| **Дисплей HDMI** | LG TV, 1360x768 (через HDMI-A-2) |
+| **Композитор** | labwc (Wayland) — **только rpi-версия 0.9.2+** |
 | **Панель** | wf-panel-pi |
 
 ## Результат
@@ -21,15 +21,16 @@ Wayland (labwc), расширенный рабочий стол с отдель�
 - **Расширенный рабочий стол**: DSI слева, HDMI справа
 - **Панель на каждом экране**: отдельный экземпляр wf-panel-pi на каждый дисплей
 - **Зеркалирование**: опционально через `wl-mirror`
+- **Bluetooth audio**: автоматическое переключение панелей при подключении BT-колонки
 
 ## Конфигурация
 
 ### Названия выходов (Pi4)
 
 ```
-DSI-1       — DSI дисплей (4.3", 800×480)
+DSI-1       — DSI дисплей (4.3", 800x480)
 HDMI-A-1    — первый HDMI (обычно не подключён)
-HDMI-A-2    — второй HDMI (LG TV, 1360×768)
+HDMI-A-2    — второй HDMI (LG TV, 1360x768)
 ```
 
 ### 1. Конфиг панели для DSI
@@ -44,7 +45,7 @@ height=36
 plugins=menu,spacer,network,bluetooth,volume,clock,powermenu
 ```
 
-*Создаётся автоматически через autostart.*
+Создаётся автоматически через panel-watchdog.
 
 ### 2. Конфиг основной панели (HDMI)
 
@@ -60,31 +61,21 @@ plugins=menu,spacer,network,bluetooth,volume,clock,powermenu
 
 ### 3. panel-watchdog — управление панелями (hotplug-ready)
 
-**Проблема:** wf-panel-pi с жёстким `monitor=` не реагирует на горячее подключение HDMI. Если дисплей не был подключён на момент старта сессии — панель на нём не появляется.
+**Проблема:** wf-panel-pi с жёстким `monitor=` не реагирует на горячее подключение HDMI.
 
 **Решение:** демон `panel-watchdog.sh`, который следит за подключением/отключением дисплеев и перезапускает панели на лету.
 
-Файл: `scripts/panel-watchdog.sh` (в этом репозитории). Путь назначения: `~/.local/bin/panel-watchdog.sh`
+Файл: `scripts/panel-watchdog.sh`. Путь назначения: `~/.local/bin/panel-watchdog.sh`
 
 ```bash
-# Установка
 mkdir -p ~/.local/bin
 cp scripts/panel-watchdog.sh ~/.local/bin/
 chmod +x ~/.local/bin/panel-watchdog.sh
 ```
 
-**Как работает:**
-- При старте запускает wf-panel-pi на **всех** подключённых дисплеях
-- Мониторит изменения через `inotifywait` на `/sys/class/drm/*/status`
-- Дублирует через `udevadm monitor` для надёжности
-- При любом изменении (hotplug HDMI) убивает старые панели и запускает новые
-- Для DSI-1 использует `wfpanel-dsi.ini`, для HDMI-дисплеев динамически создаёт конфиг
-
-> `lwrespawn` убран, т.к. его `pgrep` ищет по полному пути вместо имени процесса, что приводит к дублям панелей.
-
 ### 4. Autostart labwc — системный
 
-Файл: `/etc/xdg/labwc/autostart` — **заменён** `wf-panel-pi` на `panel-watchdog.sh`:
+Файл: `/etc/xdg/labwc/autostart` — заменён `wf-panel-pi` на `panel-watchdog.sh`:
 
 ```bash
 /usr/bin/pcmanfm-pi &
@@ -102,55 +93,90 @@ chmod +x ~/.local/bin/panel-watchdog.sh
 # user autostart — всё управление панелями через panel-watchdog.sh
 ```
 
-### 6. Зеркалирование (опционально)
+### 6. Bluetooth Audio + systemd-path
 
-Установка: `sudo apt install wl-mirror`
+При подключении BT-колонки `bt-combine.sh` создаёт combine-sink для программной регулировки громкости и сбрасывает панели через systemd path-unit.
 
-Скрипт переключения: `~/.local/bin/toggle-mirror`
+**Установка systemd units:**
 
 ```bash
-#!/bin/bash
-PID_FILE="/tmp/wl-mirror.pid"
-if [ -f "$PID_FILE" ] && kill -0 $(cat "$PID_FILE") 2>/dev/null; then
-  kill $(cat "$PID_FILE") 2>/dev/null
-  rm -f "$PID_FILE"
-  notify-send "Зеркало выключено"
-else
-  wl-mirror --fullscreen --no-show-cursor DSI-1 &
-  echo $! > "$PID_FILE"
-  notify-send "Зеркало включено"
-fi
+mkdir -p ~/.config/systemd/user
+cp configs/systemd/bt-audio.path ~/.config/systemd/user/
+cp configs/systemd/bt-audio.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now bt-audio.path
+```
+
+**Установка скриптов:**
+
+```bash
+cp scripts/bt-combine.sh ~/.local/bin/
+cp scripts/bt-panel-restart.sh ~/.local/bin/
+chmod +x ~/.local/bin/bt-combine.sh ~/.local/bin/bt-panel-restart.sh
+```
+
+**Как работает:**
+- `bt-combine.sh` создаёт combined-sink при подключении BT-аудио и создаёт файл `/tmp/bt-sink-trigger`
+- `bt-audio.path` (systemd path-unit) отслеживает изменения этого файла
+- `bt-audio.service` запускает `bt-panel-restart.sh`, который перезапускает панели для обновления списка аудиовыходов
+
+### 7. Зеркалирование (опционально)
+
+```bash
+sudo apt install wl-mirror
+```
+
+Скрипт переключения: `~/.local/bin/toggle-mirror.sh`
+
+## Установка labwc (важно!)
+
+**Используйте ТОЛЬКО версию из rpi-репозитория!** Debian-версия (0.8.3) некорректно работает с DSI-дисплеем.
+
+```bash
+# Установить из rpi-репа
+sudo apt install labwc=0.9.2-1+rpt4
+
+# Закрепить версию (чтобы не откатилась)
+sudo tee /etc/apt/preferences.d/pin-labwc-stable << 'EOF'
+Package: labwc
+Pin: version 0.9.2-1+rpt4
+Pin-Priority: 1001
+EOF
 ```
 
 ## Установка (с нуля)
 
 ```bash
-# 1. Создать конфиг панели для DSI
-mkdir -p ~/.config/wfpanel
-cat > ~/.config/wfpanel/wfpanel-dsi.ini << 'EOF'
-[panel]
-monitor=DSI-1
-position=top
-height=36
-plugins=menu,spacer,network,bluetooth,volume,clock,powermenu
-EOF
+# 1. labwc (rpi-версия)
+sudo apt install labwc=0.9.2-1+rpt4
 
-# 2. Установить panel-watchdog
+# 2. Конфиг панели для DSI
+mkdir -p ~/.config/wfpanel
+cp configs/wfpanel/wfpanel-dsi.ini ~/.config/wfpanel/
+
+# 3. Установить panel-watchdog
 mkdir -p ~/.local/bin
 cp scripts/panel-watchdog.sh ~/.local/bin/
 chmod +x ~/.local/bin/panel-watchdog.sh
 
-# 3. Исправить системный autostart (заменить wf-panel-pi на watchdog)
+# 4. Исправить системный autostart
 sudo sed -i 's|/usr/bin/wf-panel-pi|/home/pi/.local/bin/panel-watchdog.sh|' \
   /etc/xdg/labwc/autostart
 
-# 4. Очистить пользовательский autostart (если был)
+# 5. Очистить пользовательский autostart
 mkdir -p ~/.config/labwc
 echo '#!/bin/bash' > ~/.config/labwc/autostart
 chmod +x ~/.config/labwc/autostart
 
-# 5. Установить wl-mirror (опционально)
-sudo apt install -y wl-mirror
+# 6. Bluetooth audio path-unit
+cp configs/systemd/bt-audio.* ~/.config/systemd/user/
+cp scripts/bt-combine.sh ~/.local/bin/
+cp scripts/bt-panel-restart.sh ~/.local/bin/
+systemctl --user daemon-reload
+systemctl --user enable --now bt-audio.path
+
+# 7. Всё
+sudo reboot
 ```
 
 ## Быстрый старт watchdog (без перезагрузки)
@@ -164,8 +190,14 @@ killall -q wf-panel-pi 2>/dev/null
 
 ## Известные проблемы
 
+### labwc 0.8.3 (Debian) — НЕ использовать
+Debian-версия 0.8.3 оставляет zombie-процессы labwc и приводит к чёрному экрану на DSI. Фикс: установить 0.9.2 из rpi-репозитория (см. выше).
+
+### bt-volume-check.timer (устарел)
+Старый timer на 30 секунд убивал панели каждые полминуты. Заменён на systemd path-unit, который срабатывает только при реальном подключении BT.
+
 ### Разные разрешения
-DSI (800×480) и HDMI (1360×768) — зеркалирование возможно только в режиме 800×480 (HDMI переключается принудительно через `cvt` + `xrandr`, или в Wayland через `wl-mirror`).
+DSI (800x480) и HDMI (1360x768) — зеркалирование только в режиме 800x480.
 
 ## Диагностика
 
@@ -180,9 +212,36 @@ cat /sys/class/drm/card1-HDMI-A-2/status
 # Панели
 pgrep -a wf-panel-pi
 
+# BT path-unit
+systemctl --user status bt-audio.path
+systemctl --user status bt-audio.service
+
 # Включить/выключить зеркало
 wl-mirror --fullscreen DSI-1 &
 pkill wl-mirror
+```
+
+## Файлы в репозитории
+
+```
+scripts/
+├── panel-watchdog.sh      # watchdog панелей (hotplug)
+├── bt-combine.sh           # BT combine-sink + триггер
+├── bt-panel-restart.sh     # перезапуск панелей при BT
+└── toggle-backlight.sh     # переключение подсветки DSI
+
+configs/
+├── wfpanel/
+│   ├── wfpanel.ini         # панель HDMI
+│   └── wfpanel-dsi.ini     # панель DSI
+├── labwc/
+│   ├── autostart-user      # пользовательский autostart
+│   └── autostart-system    # системный autostart
+├── systemd/
+│   ├── bt-audio.path       # path-unit для BT-триггера
+│   └── bt-audio.service    # сервис перезапуска панелей
+└── apt/
+    └── README.md           # документация по pinning labwc
 ```
 
 ## Лицензия
