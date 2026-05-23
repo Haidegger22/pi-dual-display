@@ -1,4 +1,4 @@
 /usr/bin/pcmanfm-pi &
-/usr/bin/wf-panel-pi &
+/home/pi/.local/bin/panel-watchdog.sh &
 /usr/bin/kanshi &
 /usr/bin/lxsession-xdg-autostart

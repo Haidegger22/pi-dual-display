@@ -1,157 +1,62 @@
 #!/bin/bash
-# panel-watchdog.sh — следит за подключением дисплеев и перезапускает панели
-# Запускается из autostart labwc
-# v3: pgrep -x (точное имя), дебаунс 10с, отлов реальных причин смерти
+# panel-watchdog.sh — v8: создаёт конфиги для всех дисплеев, держит панели живыми
 
 CONFIG_DIR=/home/pi/.config/wfpanel
 LOG_FILE=/tmp/panel-watchdog.log
-LOCK_DIR=/tmp/panel-watchdog.lock
-DEATH_LOG=/tmp/panel-deaths.log
+PID_FILE=/tmp/panel-watchdog.pid
 
-log() {
-    echo "[$(date '+%H:%M:%S')] $*" >> "$LOG_FILE"
-}
+log() { echo "[$(date '+%H:%M:%S')] $*" >> "$LOG_FILE"; }
 
-# Защита от множественных запусков
-log "PID=$$, lock=$LOCK_DIR"
-if ! mkdir "$LOCK_DIR" 2>/dev/null; then
-    OLD_PID=$(cat "$LOCK_DIR/pid" 2>/dev/null)
-    if [ -n "$OLD_PID" ] && kill -0 "$OLD_PID" 2>/dev/null; then
-        log "WARN: watchdog уже запущен (PID $OLD_PID), выхожу"
-        exit 0
-    fi
-    log "PID $OLD_PID — мёртв, перезапуск"
-    rmdir "$LOCK_DIR" 2>/dev/null
-    mkdir "$LOCK_DIR" || { log "ERROR: не могу создать lock"; exit 1; }
+if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
+    exit 0
 fi
-echo $$ > "$LOCK_DIR/pid"
-trap 'rm -rf "$LOCK_DIR"' EXIT
+echo $$ > "$PID_FILE"
+trap 'rm -f "$PID_FILE"' EXIT
 
-LAST_RESTART=0
-RESTART_LOCK=/tmp/panel-restart.lock
+log "=== watchdog v8 PID $$ ==="
 
-restart_panels() {
-    local cause="$1"
+export WAYLAND_DISPLAY=wayland-0
+export XDG_RUNTIME_DIR=/run/user/1000
 
-    # Дебаунс: минимум 10 секунд между перезапусками
-    local now
-    now=$(date +%s)
-    if [ $((now - LAST_RESTART)) -lt 10 ]; then
-        log "restart ($cause) — пропущен, интервал < 10с"
-        return
-    fi
-    LAST_RESTART=$now
+for i in 1 2 3 4 5 6 7 8 9 10; do
+    [ -e /run/user/1000/wayland-0 ] && break
+    sleep 1
+done
 
-    # Защита от параллельных вызовов
-    if ! mkdir "$RESTART_LOCK" 2>/dev/null; then
-        log "restart ($cause) — пропущен, уже выполняется"
-        return
-    fi
+WIDGETS_LEFT="smenu spacing0 spacing4 launchers spacing8 window-list"
+WIDGETS_RIGHT="tray power ejecter spacing2 connect spacing2 bluetooth spacing2 netman spacing2 volumepulse spacing2 clock spacing2 cputemp spacing2 batt"
 
-    # Ждём готовности PulseAudio
-    local pa_waited=0
-    while [ "$pa_waited" -lt 10 ]; do
-        if pactl info >/dev/null 2>&1; then
-            break
-        fi
-        sleep 1
-        pa_waited=$((pa_waited + 1))
-    done
-    if [ "$pa_waited" -ge 10 ]; then
-        log "WARN: PulseAudio не ответил за 10с, запускаю панели всё равно"
-    elif [ "$pa_waited" -gt 0 ]; then
-        log "PA готов (ждал ${pa_waited}с)"
-    fi
-
-    local displays
-    displays=$(wlr-randr 2>/dev/null | grep -E "^[A-Z]" | awk '{print $1}')
-
-    log "===== restart ($cause) — дисплеи: $displays ====="
-
-    # Убиваем старые панели, только если они живы
-    local panel_count
-    panel_count=$(pgrep -x wf-panel-pi 2>/dev/null | wc -l)
-    if [ "$panel_count" -gt 0 ]; then
-        log "  killing $panel_count old panels"
-        for pid in $(pgrep -x wf-panel-pi 2>/dev/null); do
-            kill "$pid" 2>/dev/null
-        done
-        sleep 0.3
-    fi
-
-    for disp in $displays; do
-        local ini
-        if [ "$disp" = "DSI-1" ]; then
-            ini="$CONFIG_DIR/wfpanel-dsi.ini"
-        else
-            ini="/tmp/wfpanel-${disp}.ini"
-            cat > "$ini" << EOF
+make_config() {
+    local disp="$1" ini="$2"
+    cat > "$ini" << EOF
 [panel]
 monitor=${disp}
 position=top
 height=36
-widgets_left=smenu spacing0 spacing4 launchers spacing8 window-list 
-widgets_right=tray power ejecter spacing2 connect spacing2 bluetooth spacing2 netman spacing2 volume spacing2 clock spacing2 cputemp spacing2 batt
+widgets_left=${WIDGETS_LEFT}
+widgets_right=${WIDGETS_RIGHT}
 EOF
-        fi
-
-        if [ -f "$ini" ]; then
-            setsid /usr/bin/wf-panel-pi -c "$ini" &
-            log "  → $disp ($ini)"
-        fi
-    done
-
-    rmdir "$RESTART_LOCK" 2>/dev/null
 }
 
-# === Мониторинг: inotify + udev ===
-watch_displays() {
-    log "=== watchdog запущен ==="
-
-    # inotify: следим за статусными файлами DRM
-    while true; do
-        inotifywait -q -e modify \
-            /sys/class/drm/card1-DSI-1/status \
-            /sys/class/drm/card1-HDMI-A-2/status \
-            /sys/class/drm/card1-HDMI-A-1/status 2>/dev/null
-        sleep 0.5
-        restart_panels "inotify"
-    done &
-
-    # udev: дополнительный канал
-    udevadm monitor --subsystem-match=drm --property --udev 2>/dev/null | \
-    while IFS= read -r line; do
-        if echo "$line" | grep -qiE "(change|bind|unbind|connected|disconnected)"; then
-            sleep 0.5
-            restart_panels "udev"
-        fi
-    done &
-
-    # Проверка здоровья панелей
-    while true; do
-        sleep 300
-
-        if [ -d "$RESTART_LOCK" ]; then
-            continue
+# Запускаем по одной панели на дисплей и держим их в цикле
+for disp in $(wlr-randr 2>/dev/null | grep -E "^[A-Z]" | awk '{print $1}'); do
+    (
+        if [ "$disp" = "DSI-1" ]; then
+            ini="$CONFIG_DIR/wfpanel-dsi.ini"
+            [ -f "$ini" ] || make_config "$disp" "$ini"
+        else
+            ini="/tmp/wfpanel-${disp}.ini"
+            make_config "$disp" "$ini"
         fi
 
-        sleep 2
+        log "  сторож $disp запущен"
+        while true; do
+            /usr/bin/wf-panel-pi -c "$ini" > /dev/null 2>&1
+            log "  $disp перезапущен (exit=$?)"
+            sleep 1
+        done
+    ) &
+done
 
-        local expected
-        expected=$(wlr-randr 2>/dev/null | grep -cE "^[A-Z]")
-        local running
-        running=$(pgrep -x wf-panel-pi 2>/dev/null | wc -l)
-        if [ "$running" -lt "$expected" ] && [ "$expected" -gt 0 ]; then
-            log "health: панели упали ($running/$expected), перезапуск"
-            restart_panels "health"
-        fi
-    done &
-
-    wait
-}
-
-# === Первичный запуск ===
-restart_panels "startup"
-
-# Запускаем мониторинг
-watch_displays
+log "  все сторожа запущены"
+wait
