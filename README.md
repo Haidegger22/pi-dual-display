@@ -204,3 +204,31 @@ pactl get-default-sink  # должно быть bluez_output...
 ## Ссылки
 
 - pi4-audio-volume-fix: https://github.com/Haidegger22/pi4-audio-volume-fix
+
+---
+
+## ⚠️ Важно: ядро 6.18+ требует KMS
+
+После обновления ядра до **6.18.29+rpt-rpi-v8** драйвер `vc4-fkms-v3d` перестал видеть второй HDMI-порт (HDMI-A-2).
+
+**Решение:** переключиться на `vc4-kms-v3d` (полный KMS):
+
+```ini
+# /boot/firmware/config.txt
+dtoverlay=vc4-kms-v3d
+```
+
+С полным KMS оба порта (HDMI-A-1, HDMI-A-2) и DSI работают корректно, EDID читается, монитор определяется автоматически.
+
+`hdmi_force_hotplug` **не нужен** с полным KMS — монитор детектится сам.
+
+## Исправления 2026-05-30
+
+| Что | Было | Стало |
+|-----|------|-------|
+| Драйвер | `vc4-fkms-v3d` | `vc4-kms-v3d` |
+| Порт для TV | HDMI-A-2 не появлялся | HDMI-A-2 работает |
+| Разрешение TV | 640×480 (фейк) | 1360×768 (EDID) |
+| Панель HDMI | 36px / без иконок | 34px / иконки 28px |
+| Панель DSI | 36px / без иконок | 36px / иконки 32px |
+| cmdline.txt | с video=... | чистый, без video= |

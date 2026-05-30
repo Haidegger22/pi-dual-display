@@ -1,0 +1,12 @@
+# Pi4 dual-display config
+# Ключевое: vc4-kms-v3d (полный KMS) для поддержки обоих HDMI
+dtoverlay=vc4-kms-v3d
+max_framebuffers=2
+disable_overscan=1
+arm_64bit=1
+
+# DSI автоопределение
+display_auto_detect=1
+
+# Аудио
+dtparam=audio=on
