@@ -1,8 +1,10 @@
 #!/bin/bash
-# panel-watchdog.sh — создаёт конфиги для всех дисплеев, держит панели живыми
-# v8.1 — 2026-05-30: разные размеры для DSI и HDMI
+# panel-watchdog.sh — держит панели живыми на всех дисплеях
+# v8.2 — 2026-11-01: конфиг панели 1.43+ лежит в ~/.config/wf-panel-pi/wf-panel-pi.ini
+#   (старый путь ~/.config/wfpanel/wfpanel-<монитор>.ini панель больше НЕ читает)
 
-CONFIG_DIR=/home/pi/.config/wfpanel
+CONFIG_DIR=/home/pi/.config/wf-panel-pi
+CONFIG_FILE="$CONFIG_DIR/wf-panel-pi.ini"
 LOG_FILE=/tmp/panel-watchdog.log
 PID_FILE=/tmp/panel-watchdog.pid
 
@@ -31,16 +33,16 @@ WIDGETS_RIGHT="power ejecter spacing2 connect spacing2 bluetooth spacing2 netman
 for disp in $(wlr-randr 2>/dev/null | grep -E "^[A-Z]" | awk '{print $1}'); do
     (
         if [ "$disp" = "DSI-1" ]; then
-            ini="$CONFIG_DIR/wfpanel-dsi.ini"
+            ini="$CONFIG_FILE"
             height=36
             icon=32
         else
-            ini="/tmp/wfpanel-${disp}.ini"
+            ini="/tmp/wf-panel-${disp}.ini"
             height=34
             icon=28
         fi
-        # DSI-конфиг пользователь настраивает руками (отступы меню, порядок виджетов):
-        # если файл есть — не трогаем. HDMI-конфиги в /tmp генерируем всегда.
+        # Рабочий конфиг панели настраивается руками (отступы меню, порядок виджетов):
+        # если файл есть — не трогаем. Временные конфиги для доп. дисплеев генерируем всегда.
         if [ "$disp" = "DSI-1" ] && [ -f "$ini" ]; then
             log "  $disp: конфиг уже есть, оставляю как настроено ($ini)"
         else
@@ -60,7 +62,7 @@ EOF
             # wf-panel-pi 1.43+ не поддерживает флаг -c (панель отвечает
             # «Неизвестный параметр -c» и сразу выходит с кодом 0 -> watchdog
             # крутил бы перезапуск каждую секунду). Конфиг панель берёт сама:
-            # ~/.config/wfpanel/wfpanel-<монитор>.ini
+            # ~/.config/wf-panel-pi/wf-panel-pi.ini
             /usr/bin/wf-panel-pi > /dev/null 2>&1
             log "  $disp перезапущен (exit=$?)"
             sleep 1

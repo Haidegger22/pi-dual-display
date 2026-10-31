@@ -57,14 +57,14 @@ chmod +x ~/.local/bin/panel-watchdog.sh
 /usr/bin/lxsession-xdg-autostart
 ```
 
-### 3. Конфиги панелей
+### 3. Конфиг панели
+
+С версии wf-panel-pi **1.43** панель читает единственный файл `~/.config/wf-panel-pi/wf-panel-pi.ini`
+(старый путь `~/.config/wfpanel/wfpanel-<монитор>.ini` больше не используется).
 
 ```bash
-# HDMI
-cp configs/wfpanel/wfpanel.ini ~/.config/wfpanel/
-
-# DSI
-cp configs/wfpanel/wfpanel-dsi.ini ~/.config/wfpanel/
+mkdir -p ~/.config/wf-panel-pi
+cp configs/wf-panel-pi/wf-panel-pi.ini ~/.config/wf-panel-pi/wf-panel-pi.ini
 ```
 
 ### 4. Управление громкостью (BT + HDMI)
@@ -109,10 +109,9 @@ chmod +x ~/.local/bin/toggle-backlight.sh
 # 1. labwc (rpi)
 sudo apt install labwc=0.9.2-1+rpt4
 
-# 2. Конфиги панелей
-mkdir -p ~/.config/wfpanel
-cp configs/wfpanel/wfpanel.ini ~/.config/wfpanel/
-cp configs/wfpanel/wfpanel-dsi.ini ~/.config/wfpanel/
+# 2. Конфиг панели (1.43+)
+mkdir -p ~/.config/wf-panel-pi
+cp configs/wf-panel-pi/wf-panel-pi.ini ~/.config/wf-panel-pi/wf-panel-pi.ini
 
 # 3. watchdog
 mkdir -p ~/.local/bin
@@ -170,9 +169,11 @@ scripts/
 └── toggle-backlight.sh      # подсветка DSI
 
 configs/
-├── wfpanel/
-│   ├── wfpanel.ini          # панель HDMI
-│   └── wfpanel-dsi.ini      # панель DSI
+├── wf-panel-pi/
+│   └── wf-panel-pi.ini      # рабочий конфиг панели (1.43+)
+├── wfpanel-obsolete/
+│   ├── wfpanel.ini          # старый путь (панель <1.43, больше не читается)
+│   └── wfpanel-dsi.ini
 ├── labwc/
 │   ├── rc.xml               # хоткеи
 │   ├── autostart-system     # системный autostart
@@ -241,7 +242,7 @@ dtoverlay=vc4-kms-v3d
 | Что | Было | Стало |
 |-----|------|-------|
 | Запуск панели | `wf-panel-pi -c "$ini"` | `wf-panel-pi` (без аргументов) |
-| Откуда конфиг | явный путь через `-c` | сам из `~/.config/wfpanel/wfpanel-<монитор>.ini` |
+| Откуда конфиг | явный путь через `-c` | сам из `~/.config/wf-panel-pi/wf-panel-pi.ini` |
 | Формат конфига | `plugins=menu,spacer,network,...` | `widgets_left=...` / `widgets_right=...` |
 | Симптом | панели нет, в логе `перезапущен (exit=0)` каждую секунду | панель на месте, виджеты в нужном порядке |
 
@@ -252,3 +253,28 @@ dtoverlay=vc4-kms-v3d
 **Проверка порядка виджетов:** в `widgets_left` / `widgets_right` порядок перечисления =
 порядок на панели. Например `... clock spacing2 tray spacing2 cputemp ...` даёт
 часы → температура NVMe (tray) → температура CPU (cputemp).
+
+## Исправления 2026-11-01 (продолжение) — где живёт конфиг панели
+
+Долго искали, почему правки конфига не действуют: панель 1.43 читает
+**`~/.config/wf-panel-pi/wf-panel-pi.ini`**, а не `~/.config/wfpanel/wfpanel-<монитор>.ini`
+(последний — наследие старых версий, панель его игнорирует молча).
+
+| Что | Было | Стало |
+|-----|------|-------|
+| Файл конфига | `~/.config/wfpanel/wfpanel-dsi.ini` | `~/.config/wf-panel-pi/wf-panel-pi.ini` |
+| Проверить, что читает панель | — | `strace -f -e trace=openat wf-panel-pi` (в старом пути `.ini` не будет) |
+
+**Порядок «NVMe рядом с CPU»:** значок температуры NVMe — это SNI-элемент внутри плагина
+`tray`, поэтому его позиция определяется местом `tray` в `widgets_right`. Рабочая строка:
+
+```
+widgets_right=power ejecter spacing2 connect spacing2 bluetooth spacing2 netman spacing2 volumepulse spacing2 clock spacing2 tray spacing2 cputemp spacing2 batt
+```
+
+даёт: … часы → **NVMe (tray)** → **CPU (cputemp)** → батарея. Две температурные плашки
+встают вплотную друг к другу справа от часов.
+
+⚠️ `panel-watchdog.sh` **не должен** генерировать этот файл заново: в нём живут ручные
+настройки (отступы меню `smenu_padding`, порядок виджетов). Скрипт проверяет наличие файла
+и оставляет его как есть.
