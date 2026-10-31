@@ -25,7 +25,8 @@ for i in $(seq 1 15); do
 done
 
 WIDGETS_LEFT="smenu spacing0 spacing4 launchers spacing8 window-list"
-WIDGETS_RIGHT="tray power ejecter spacing2 connect spacing2 bluetooth spacing2 netman spacing2 volumepulse spacing2 clock spacing2 cputemp spacing2 batt"
+# порядок = порядок на панели: трей (в нём значок температуры NVMe) стоит перед cputemp
+WIDGETS_RIGHT="power ejecter spacing2 connect spacing2 bluetooth spacing2 netman spacing2 volumepulse spacing2 clock spacing2 tray spacing2 cputemp spacing2 batt"
 
 for disp in $(wlr-randr 2>/dev/null | grep -E "^[A-Z]" | awk '{print $1}'); do
     (
@@ -38,7 +39,12 @@ for disp in $(wlr-randr 2>/dev/null | grep -E "^[A-Z]" | awk '{print $1}'); do
             height=34
             icon=28
         fi
-        cat > "$ini" << EOF
+        # DSI-конфиг пользователь настраивает руками (отступы меню, порядок виджетов):
+        # если файл есть — не трогаем. HDMI-конфиги в /tmp генерируем всегда.
+        if [ "$disp" = "DSI-1" ] && [ -f "$ini" ]; then
+            log "  $disp: конфиг уже есть, оставляю как настроено ($ini)"
+        else
+            cat > "$ini" << EOF
 [panel]
 monitor=${disp}
 position=top
@@ -47,6 +53,7 @@ icon_size=${icon}
 widgets_left=${WIDGETS_LEFT}
 widgets_right=${WIDGETS_RIGHT}
 EOF
+        fi
 
         log "  сторож $disp (h=$height icon=$icon)"
         while true; do
