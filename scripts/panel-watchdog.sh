@@ -50,7 +50,11 @@ EOF
 
         log "  сторож $disp (h=$height icon=$icon)"
         while true; do
-            /usr/bin/wf-panel-pi -c "$ini" > /dev/null 2>&1
+            # wf-panel-pi 1.43+ не поддерживает флаг -c (панель отвечает
+            # «Неизвестный параметр -c» и сразу выходит с кодом 0 -> watchdog
+            # крутил бы перезапуск каждую секунду). Конфиг панель берёт сама:
+            # ~/.config/wfpanel/wfpanel-<монитор>.ini
+            /usr/bin/wf-panel-pi > /dev/null 2>&1
             log "  $disp перезапущен (exit=$?)"
             sleep 1
         done

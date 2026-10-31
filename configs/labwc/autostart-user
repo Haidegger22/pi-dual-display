@@ -1,2 +1,17 @@
 #!/bin/bash
-# user autostart — всё управление панелями через panel-watchdog.sh
+# user autostart
+
+# HDMI — телевизор CTV, 2288x1430 (крупно и читаемо) — первым, чтобы был основным
+# (устарело, заменено autostart-screen.sh) wlr-randr --output HDMI-A-2 --mode 2288x1430 2>/dev/null || true
+# DSI — встроенный дисплей
+# (устарело, заменено autostart-screen.sh) wlr-randr --output DSI-1 --mode 800x480 2>/dev/null || true
+# panel-watchdog перезапускает панели при hotplug
+
+/usr/bin/pcmanfm-pi &
+/home/pi/.local/bin/panel-watchdog.sh &
+# kanshi отключён — мешает переключению режимов
+/usr/bin/lxsession-xdg-autostart
+
+# Chromium с remote debugging (для MIMO CDP мониторинга)
+chromium &
+/home/pi/.config/labwc/autostart-screen.sh &
