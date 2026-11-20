@@ -40,6 +40,13 @@ OLD_ICON_DIRS = (
 )
 ICON_PREFIX = "nvme-temp"
 REFRESH_SEC = 10
+# Гистерезис: NVMe-температура в простое колеблется на 1-2° (46↔47↔48), и без
+# него каждое колебание = запись PNG + 4 sudo-install в тему + пересборка кэша
+# иконок -> панель перерисовывает трей, значок успевает мигнуть. Показываем
+# новое значение только при сдвиге на HYSTERESIS градусов (или при смене
+# цветовой зоны), плюс принудительное обновление раз в FORCE_EVERY тиков.
+HYSTERESIS = 2
+FORCE_EVERY = 30          # 30 * 10 с = 5 минут
 SIZE = 32          # ровно под слот трея (панель показывает иконку ~30x28)
 
 
@@ -146,11 +153,17 @@ def sync_to_theme(name):
                                capture_output=True, timeout=20)
 
 
-def draw_icon(t):
+def draw_icon(t, force=False):
     """Плашка в стиле штатного виджета CPU (светло-серая + тёмная цифра)
     и неоновый ободок по периметру; цвет ободка — по температуре.
 
     Возвращает имя иконки для панели (без пути и расширения).
+
+    force=True — перерисовать даже если файл уже есть (нужно при старте:
+    на случай битого/устаревшего PNG). При обычном обновлении файл того же
+    значения НЕ перезаписывается: иначе mtime исходника каждый раз новее
+    копии в теме, и виджет каждые 10 с дёргает sudo-install + пересборку
+    кэша иконок — панель в этот момент перерисовывает трей и значок мигает.
     """
     os.makedirs(ICON_DIR, exist_ok=True)
     W = H = SIZE
@@ -204,7 +217,8 @@ def draw_icon(t):
 
     name = f"{ICON_PREFIX}-{t}" if t is not None else f"{ICON_PREFIX}-na"
     path = os.path.join(ICON_DIR, name + ".png")
-    surf.write_to_png(path)
+    if force or not os.path.exists(path):
+        surf.write_to_png(path)
 
     # Убираем прошлые значения и кэш темы: панель wf-panel-pi читает
     # icon-theme.cache и без этого продолжает показывать старое значение.
@@ -236,14 +250,16 @@ def draw_icon(t):
 class NvmeTray:
     def __init__(self):
         self.temp = read_temp()
+        self.ticks = 0
+        name = draw_icon(self.temp, force=True)
         self.ind = AppIndicator.Indicator.new(
-            "nvme-temp", draw_icon(self.temp), AppIndicator.IndicatorCategory.HARDWARE
+            "nvme-temp", name, AppIndicator.IndicatorCategory.HARDWARE
         )
         self.ind.set_status(AppIndicator.IndicatorStatus.ACTIVE)
         self.ind.set_title("NVMe")
         # theme path уже при первом показе: панель может стартовать после значка
         self.ind.set_icon_theme_path(ICON_DIR)
-        self.ind.set_icon_full(draw_icon(self.temp), self.label())
+        self.ind.set_icon_full(name, self.label())
 
         menu = Gtk.Menu()
         self.header = Gtk.MenuItem(label=self.label())
@@ -265,13 +281,26 @@ class NvmeTray:
         return f"NVMe {self.temp}°C" if self.temp is not None else "NVMe: нет данных"
 
     def refresh(self):
-        self.temp = read_temp()
+        self.ticks += 1
+        new_temp = read_temp()
+        force = (self.ticks % FORCE_EVERY) == 0
+        if not force and self._close_enough(new_temp):
+            return True
+        self.temp = new_temp
         # set_icon_theme_path перестраивает тему иконок в панели: без этого
         # wf-panel-pi держит картинку в кэше и продолжает показывать старое значение.
         self.ind.set_icon_theme_path(ICON_DIR)
-        self.ind.set_icon_full(draw_icon(self.temp), self.label())
+        self.ind.set_icon_full(draw_icon(self.temp, force=force), self.label())
         self.header.set_label(self.label())
         return True
+
+    def _close_enough(self, new_temp):
+        """Обновлять ли панель: нет, если значение почти то же и зона та же."""
+        if self.temp is None or new_temp is None:
+            return new_temp == self.temp
+        if temp_color(new_temp) != temp_color(self.temp):
+            return False                       # сменилась цветовая зона — обновляем сразу
+        return abs(new_temp - self.temp) < HYSTERESIS
 
 
 def main():
