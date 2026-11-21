@@ -15,6 +15,7 @@ NVMe-температура в трее панели wf-panel-pi (Wayland/labwc)
 """
 import os
 import re
+import signal
 import subprocess
 import sys
 
@@ -45,13 +46,26 @@ REFRESH_SEC = 10
 # иконок -> панель перерисовывает трей, значок успевает мигнуть. Показываем
 # новое значение только при сдвиге на HYSTERESIS градусов (или при смене
 # цветовой зоны), плюс принудительное обновление раз в FORCE_EVERY тиков.
-HYSTERESIS = 2
+HYSTERESIS = int(os.environ.get("NVME_HYSTERESIS", "2"))   # 0 = обновлять на каждый градус (для тестов)
 FORCE_EVERY = 30          # 30 * 10 с = 5 минут
+KEEP_ICONS = 6            # сколько прошлых значений держать в теме (панель может ссылаться на старое имя)
 SIZE = 32          # ровно под слот трея (панель показывает иконку ~30x28)
 
 
 def read_temp():
-    """Температура NVMe: сначала smartctl, затем health.log. None, если не удалось."""
+    """Температура NVMe: сначала smartctl, затем health.log. None, если не удалось.
+
+    NVME_TEMP_OFFSET — только для диагностики: сдвинуть показание, чтобы
+    принудительно сменить значение и проверить, как панель переживает смену имени иконки.
+    """
+    offset = int(os.environ.get("NVME_TEMP_OFFSET", "0"))
+    t = _read_temp_raw()
+    if t is not None:
+        t += offset
+    return t
+
+
+def _read_temp_raw():
     try:
         out = subprocess.run(
             ["sudo", "-n", "smartctl", "-A", DISK],
@@ -136,16 +150,29 @@ def sync_to_theme(name):
                 capture_output=True, timeout=10,
             )
             changed = True
-        # подчистить прошлые значения в теме, чтобы не копились
+        # подчистить прошлые значения в теме: держим KEEP_ICONS самых свежих.
+        # Удалять сразу нельзя — в момент смены значения панель ещё может
+        # ссылаться на прошлое имя и без файла оставляет пустой слот.
         for sub in ("32x32/apps", "32x32/status"):
             d = os.path.join(theme_root, sub)
             if not os.path.isdir(d):
                 continue
-            for f in os.listdir(d):
-                if f.startswith(ICON_PREFIX + "-") and f != name + ".png":
-                    subprocess.run(["sudo", "-n", "rm", "-f", os.path.join(d, f)],
-                                   capture_output=True, timeout=10)
+            try:
+                old = [
+                    os.path.join(d, f) for f in os.listdir(d)
+                    if f.startswith(ICON_PREFIX + "-") and f != name + ".png"
+                ]
+            except OSError:
+                continue
+            old.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+            for p in old[KEEP_ICONS:]:
+                subprocess.run(["sudo", "-n", "rm", "-f", p],
+                               capture_output=True, timeout=10)
     if changed:
+        # Кэш активной темы пересобираем: без этого панель не видит НОВОЕ имя
+        # файла (проверено 21.11.2026 — новый SNI-итем с новой иконкой остался
+        # невидимым, пока кэш не обновлён). Старые файлы при этом не удаляются
+        # (KEEP_ICONS), чтобы панель не осталась со ссылкой на удалённое имя.
         for root in THEME_ROOTS:
             theme_root = os.path.join(root, theme)
             if os.path.isdir(theme_root):
@@ -222,12 +249,18 @@ def draw_icon(t, force=False):
 
     # Убираем прошлые значения и кэш темы: панель wf-panel-pi читает
     # icon-theme.cache и без этого продолжает показывать старое значение.
-    for f in os.listdir(ICON_DIR):
-        if f.startswith(ICON_PREFIX + "-") and f != name + ".png":
-            try:
-                os.remove(os.path.join(ICON_DIR, f))
-            except OSError:
-                pass
+    # Держим KEEP_ICONS свежих файлов — см. sync_to_theme.
+    try:
+        files = [os.path.join(ICON_DIR, f) for f in os.listdir(ICON_DIR)
+                 if f.startswith(ICON_PREFIX + "-") and f != name + ".png"]
+    except OSError:
+        files = []
+    files.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+    for p in files[KEEP_ICONS:]:
+        try:
+            os.remove(p)
+        except OSError:
+            pass
     for d in OLD_ICON_DIRS:
         if not os.path.isdir(d):
             continue
@@ -243,6 +276,9 @@ def draw_icon(t, force=False):
             os.remove(cache)
         except OSError:
             pass
+    # Копию в активную тему (PiXtrix) делаем обязательно: без файла в теме
+    # панель новый SNI-итем не рисует вовсе (проверено 21.11.2026 — hicolor как
+    # fallback при регистрации значка не подхватывается).
     sync_to_theme(name)
     return name
 
@@ -276,6 +312,12 @@ class NvmeTray:
         self.ind.set_menu(menu)
 
         GLib.timeout_add_seconds(REFRESH_SEC, self.refresh)
+        # Панель иногда не рисует слот у только что зарегистрированного item
+        # (гонка при её инициализации трея). Два повторных «пинка» после старта
+        # закрывают это: проверено 21.11.2026 — без них значок отсутствовал до
+        # первого обновления значения.
+        GLib.timeout_add(3000, self._repush)
+        GLib.timeout_add(8000, self._repush)
 
     def label(self):
         return f"NVMe {self.temp}°C" if self.temp is not None else "NVMe: нет данных"
@@ -292,7 +334,35 @@ class NvmeTray:
         self.ind.set_icon_theme_path(ICON_DIR)
         self.ind.set_icon_full(draw_icon(self.temp, force=force), self.label())
         self.header.set_label(self.label())
+        # Второй «пинок» через полторы секунды: панель при смене значения и
+        # пересборке кэша темы иногда теряет слот (пустое место в трее), хотя
+        # файл на месте. Повторная установка заставляет её перечитать иконку.
+        GLib.timeout_add(1500, self._repush)
         return True
+
+    def _repush(self):
+        name = f"{ICON_PREFIX}-{self.temp}" if self.temp is not None else f"{ICON_PREFIX}-na"
+        self.ind.set_icon_theme_path(ICON_DIR)
+        self.ind.set_icon_full(name, self.label())
+        return False
+
+    def force_refresh(self):
+        """Принудительное обновление (SIGUSR1) — для диагностики."""
+        self.temp = read_temp()
+        self.ind.set_icon_theme_path(ICON_DIR)
+        self.ind.set_icon_full(draw_icon(self.temp, force=True), self.label())
+        self.header.set_label(self.label())
+        return False
+
+    def bump(self):
+        """Диагностика (SIGUSR2): сдвинуть показание на +5 и перерисовать —
+        проверка того, как панель переживает смену ИМЕНИ иконки."""
+        self.temp = (self.temp or 0) + 5
+        self.ind.set_icon_theme_path(ICON_DIR)
+        self.ind.set_icon_full(draw_icon(self.temp, force=True), self.label())
+        self.header.set_label(self.label())
+        GLib.timeout_add(1500, self._repush)
+        return False
 
     def _close_enough(self, new_temp):
         """Обновлять ли панель: нет, если значение почти то же и зона та же."""
@@ -307,7 +377,10 @@ def main():
     if not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY"):
         print("нет графической сессии (нужны DISPLAY или WAYLAND_DISPLAY)", file=sys.stderr)
         return 1
-    NvmeTray()
+    tray = NvmeTray()
+    # SIGUSR1 — принудительно перерисовать значок, SIGUSR2 — сдвинуть показание (диагностика)
+    signal.signal(signal.SIGUSR1, lambda *_: GLib.idle_add(tray.force_refresh))
+    signal.signal(signal.SIGUSR2, lambda *_: GLib.idle_add(tray.bump))
     Gtk.main()
     return 0
 

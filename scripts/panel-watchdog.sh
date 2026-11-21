@@ -28,6 +28,14 @@ WIDGET_UNIT=nvme-temp-tray.service
 PANEL=/usr/bin/wf-panel-pi
 
 log() { echo "[$(date '+%H:%M:%S')] $*" >> "$LOG_FILE"; }
+# Вывод панели больше не выбрасываем: без него не видно, почему она теряет
+# значок трея. Файл ротируется по размеру, чтобы не рос бесконечно.
+PANEL_LOG=/tmp/panel.log
+panel_log() {
+    if [ -f "$PANEL_LOG" ] && [ "$(stat -c %s "$PANEL_LOG")" -gt 512000 ]; then
+        mv -f "$PANEL_LOG" "$PANEL_LOG.1"
+    fi
+}
 
 # один сторож на сессию: второй экземпляр молча выходит
 exec 9>"$LOCK_FILE"
@@ -87,7 +95,8 @@ while true; do
 
     log "  панели нет — запуск"
     started=$(date +%s)
-    "$PANEL" > /dev/null 2>&1 &
+    panel_log
+    "$PANEL" >> "$PANEL_LOG" 2>&1 &
     sleep 8
 
     if panel_alive; then
